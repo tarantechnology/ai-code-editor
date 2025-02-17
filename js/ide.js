@@ -66,15 +66,28 @@ var layoutConfig = {
         }, {
             type: "column",
             content: [{
-                type: "component",
-                height: 66,
-                componentName: "ai",
-                id: "ai",
-                title: "AI Assistant",
-                isClosable: false,
-                componentState: {
-                    readOnly: false
-                }
+                type: "stack",
+                height: 50,
+                content: [{
+                    type: "component",
+                    componentName: "ai",
+                    id: "ai",
+                    title: "AI Assistant",
+                    isClosable: false,
+                    componentState: {
+                        readOnly: false
+                    }
+                },
+                {
+                    type: "component",
+                    componentName: "Composer",
+                    id: "Composer",
+                    title: "Composer",
+                    isClosable: false,
+                    componentState: {
+                        readOnly: false
+                    }
+                }]
             }, {
                 type: "stack",
                 content: [
@@ -672,7 +685,449 @@ document.addEventListener("DOMContentLoaded", async function () {
         });
 
         layout.registerComponent("ai", function (container, state) {
-            container.getElement()[0].appendChild(document.getElementById("judge0-chat-container"));
+            try {
+                // Create a dedicated container for the AI chat interface
+                const aiContainer = document.createElement('div');
+                aiContainer.className = 'ai-chat-container';
+                aiContainer.style.cssText = 'height: 100%; display: flex; flex-direction: column; padding: 10px; gap: 10px;';
+
+                // Create model selector
+                const modelSelector = document.createElement('select');
+                modelSelector.className = 'model-selector';
+                modelSelector.style.cssText = 'padding: 8px; border: 1px solid #ddd; border-radius: 4px;';
+                
+                // Loading message for models
+                modelSelector.innerHTML = '<option>Loading models...</option>';
+
+                // Create chat history area
+                const chatHistory = document.createElement('div');
+                chatHistory.className = 'chat-history';
+                chatHistory.style.cssText = 'flex: 1; overflow-y: auto; margin-bottom: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 4px;';
+
+                // Create input area
+                const inputContainer = document.createElement('div');
+                inputContainer.style.cssText = 'display: flex; gap: 10px;';
+
+                const textInput = document.createElement('textarea');
+                textInput.className = 'ai-input';
+                textInput.placeholder = 'Ask me anything about your code...';
+                textInput.style.cssText = 'flex: 1; padding: 8px; border: 1px solid #ddd; border-radius: 4px; resize: vertical; min-height: 40px;';
+
+                const sendButton = document.createElement('button');
+                sendButton.className = 'ai-send-button';
+                sendButton.textContent = 'Send';
+                sendButton.style.cssText = 'padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;';
+
+                // OpenRouter configuration
+                const OPENROUTER_API_KEY = ""; // Add your OpenRouter API key here
+                const API_BASE_URL = "https://openrouter.ai/api/v1";
+
+                // Fetch models
+                async function fetchModels() {
+                    try {
+                        console.log('Fetching models from:', `${API_BASE_URL}/models`);
+                        
+                        const headers = new Headers({
+                            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                            'HTTP-Referer': 'https://judge0.com',
+                            'X-Title': 'Judge0 IDE'
+                        });
+
+                        const response = await fetch(`${API_BASE_URL}/models`, {
+                            method: 'GET',
+                            headers: headers
+                        });
+
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            console.error('Models API Error:', {
+                                status: response.status,
+                                text: errorText
+                            });
+                            throw new Error(`Failed to fetch models: ${response.status}`);
+                        }
+
+                        const data = await response.json();
+                        console.log('Raw model data:', data.data[0]); // Log the first model to see structure
+                        
+                        modelSelector.innerHTML = '';
+                        
+                        data.data
+                            .filter(model => model.context_length >= 4000)
+                            .sort((a, b) => {
+                                // Sort by context length as primary criteria
+                                return b.context_length - a.context_length;
+                            })
+                            .forEach(model => {
+                                const option = document.createElement('option');
+                                option.value = model.id;
+                                
+                                // Format the model display with context length
+                                const contextK = Math.round(model.context_length / 1000);
+                                option.textContent = `${model.name} (${contextK}k context)`;
+                                
+                                modelSelector.appendChild(option);
+                            });
+
+                        // Select the first model by default
+                        if (modelSelector.options.length > 0) {
+                            modelSelector.selectedIndex = 0;
+                        }
+
+                        console.log('Models loaded successfully');
+
+                    } catch (error) {
+                        console.error('Error fetching models:', error);
+                        modelSelector.innerHTML = '<option>Error loading models</option>';
+                        sourceEditor.setValue(`// Error loading models: ${error.message}\n// Please check the console for more details.`);
+                    }
+                }
+
+                // Add event listeners
+                textInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                    }
+                });
+
+                sendButton.addEventListener('click', handleSend);
+
+                async function handleSend() {
+                    try {
+                        const message = textInput.value.trim();
+                        if (!message) return;
+                        
+                        if (!modelSelector.value || modelSelector.value === 'Error loading models') {
+                            addMessageToChat('system', 'Please wait for models to load or refresh if there was an error.');
+                            return;
+                        }
+
+                        // Disable input while processing
+                        textInput.disabled = true;
+                        sendButton.disabled = true;
+                        
+                        // Add user message to chat
+                        addMessageToChat('user', message);
+                        
+                        // Get current code context
+                        const codeContext = sourceEditor.getValue();
+                        
+                        // Send to AI and get response
+                        const response = await sendToAI(message, codeContext, modelSelector.value);
+                        addMessageToChat('assistant', response);
+                        
+                        // Clear input and re-enable
+                        textInput.value = '';
+                        textInput.disabled = false;
+                        sendButton.disabled = false;
+                        textInput.focus();
+                    } catch (error) {
+                        console.error('Error in handleSend:', error);
+                        addMessageToChat('system', 'Error: ' + error.message);
+                        textInput.disabled = false;
+                        sendButton.disabled = false;
+                    }
+                }
+
+                function addMessageToChat(role, content) {
+                    const messageDiv = document.createElement('div');
+                    messageDiv.className = `chat-message ${role}-message`;
+                    messageDiv.style.cssText = 'margin-bottom: 10px; padding: 8px; border-radius: 4px;';
+                    
+                    // Style based on role
+                    switch(role) {
+                        case 'user':
+                            messageDiv.style.backgroundColor = '#e3f2fd';
+                            messageDiv.style.marginLeft = '20%';
+                            break;
+                        case 'assistant':
+                            messageDiv.style.backgroundColor = '#f5f5f5';
+                            messageDiv.style.marginRight = '20%';
+                            break;
+                        case 'system':
+                            messageDiv.style.backgroundColor = '#fff3e0';
+                            break;
+                    }
+
+                    // Handle markdown formatting if it's code
+                    if (content.includes('```')) {
+                        const formattedContent = content.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+                            return `<pre><code class="${lang || ''}">${code.trim()}</code></pre>`;
+                        });
+                        messageDiv.innerHTML = formattedContent;
+                    } else {
+                        messageDiv.textContent = content;
+                    }
+
+                    chatHistory.appendChild(messageDiv);
+                    chatHistory.scrollTop = chatHistory.scrollHeight;
+                }
+
+                async function sendToAI(message, codeContext, modelId) {
+                    const response = await fetch(`${API_BASE_URL}/chat/completions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                            'HTTP-Referer': window.location.href,
+                            'X-Title': 'Judge0 IDE'
+                        },
+                        body: JSON.stringify({
+                            model: modelId,
+                            messages: [
+                                {
+                                    role: "system",
+                                    content: "You are a helpful coding assistant. Provide clear, concise answers and include code examples when relevant."
+                                },
+                                {
+                                    role: "user",
+                                    content: `Context (current code):\n\`\`\`\n${codeContext}\n\`\`\`\n\nQuestion: ${message}`
+                                }
+                            ]
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+                    return data.choices[0].message.content;
+                }
+
+                // Assemble the UI
+                aiContainer.appendChild(modelSelector);
+                aiContainer.appendChild(chatHistory);
+                aiContainer.appendChild(inputContainer);
+                inputContainer.appendChild(textInput);
+                inputContainer.appendChild(sendButton);
+                container.getElement()[0].appendChild(aiContainer);
+
+                // Fetch models when component is mounted
+                fetchModels();
+
+            } catch (error) {
+                console.error('Error in AI component initialization:', error);
+                const errorDiv = document.createElement('div');
+                errorDiv.style.cssText = 'color: red; padding: 20px;';
+                errorDiv.textContent = 'Error initializing AI component: ' + error.message;
+                container.getElement()[0].appendChild(errorDiv);
+            }
+        });
+
+        layout.registerComponent("Composer", function (container, state) {
+            try {
+                // Create container with proper scrolling
+                const composerContainer = document.createElement('div');
+                composerContainer.className = 'composer-container';
+                composerContainer.style.cssText = `
+                    height: 100%;
+                    display: flex;
+                    flex-direction: column;
+                    padding: 10px;
+                    gap: 10px;
+                    position: relative;
+                    overflow: hidden;
+                `;
+
+                // Create model selector with fixed height
+                const modelSelector = document.createElement('select');
+                modelSelector.className = 'model-selector';
+                modelSelector.style.cssText = `
+                    padding: 8px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    flex: 0 0 auto;
+                `;
+
+                // Create prompt input with flexible height
+                const promptInput = document.createElement('textarea');
+                promptInput.className = 'prompt-input';
+                promptInput.placeholder = 'Describe the code you want to write or edit...';
+                promptInput.style.cssText = `
+                    padding: 8px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    resize: vertical;
+                    min-height: 60px;
+                    max-height: 200px;
+                    flex: 0 0 auto;
+                `;
+
+                // Create buttons container with fixed height
+                const buttonsContainer = document.createElement('div');
+                buttonsContainer.style.cssText = `
+                    display: flex;
+                    gap: 10px;
+                    justify-content: flex-end;
+                    flex: 0 0 auto;
+                `;
+
+                // Create generate button
+                const generateButton = document.createElement('button');
+                generateButton.textContent = 'Generate';
+                generateButton.style.cssText = `
+                    padding: 8px 16px;
+                    background: #007bff;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    cursor: pointer;
+                `;
+
+                // Add loading overlay
+                const loadingOverlay = document.createElement('div');
+                loadingOverlay.className = 'loading-overlay';
+                loadingOverlay.style.cssText = `
+                    display: none;
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(255, 255, 255, 0.9);
+                    z-index: 1000;
+                    justify-content: center;
+                    align-items: center;
+                    flex-direction: column;
+                    gap: 15px;
+                `;
+
+                const spinner = document.createElement('div');
+                spinner.className = 'spinner';
+                spinner.style.cssText = `
+                    width: 40px;
+                    height: 40px;
+                    border: 4px solid #f3f3f3;
+                    border-top: 4px solid #3498db;
+                    border-radius: 50%;
+                    animation: spin 1s linear infinite;
+                `;
+
+                const loadingText = document.createElement('div');
+                loadingText.textContent = 'Generating code...';
+                loadingText.style.cssText = `
+                    color: #333;
+                    font-size: 14px;
+                    font-weight: bold;
+                `;
+
+                // Add keyframe animation
+                const styleSheet = document.createElement('style');
+                styleSheet.textContent = `
+                    @keyframes spin {
+                        0% { transform: rotate(0deg); }
+                        100% { transform: rotate(360deg); }
+                    }
+                `;
+                document.head.appendChild(styleSheet);
+
+                loadingOverlay.appendChild(spinner);
+                loadingOverlay.appendChild(loadingText);
+                composerContainer.appendChild(loadingOverlay);
+
+                // Update handleGenerate function
+                async function handleGenerate() {
+                    try {
+                        const prompt = promptInput.value.trim();
+                        if (!prompt) return;
+
+                        if (!modelSelector.value || modelSelector.value === 'Error loading models') {
+                            sourceEditor.setValue('// Please wait for models to load or refresh if there was an error.');
+                            return;
+                        }
+
+                        // Show loading animation
+                        loadingOverlay.style.display = 'flex';
+                        generateButton.disabled = true;
+                        generateButton.textContent = 'Generating...';
+
+                        const currentCode = sourceEditor.getValue();
+                        const response = await fetch(`${API_BASE_URL}/chat/completions`, {
+                            method: 'POST',
+                            headers: new Headers({
+                                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                                'HTTP-Referer': 'https://judge0.com',
+                                'X-Title': 'Judge0 IDE',
+                                'Content-Type': 'application/json'
+                            }),
+                            body: JSON.stringify({
+                                model: modelSelector.value,
+                                messages: [
+                                    {
+                                        role: "system",
+                                        content: "You are a code composer that helps write and edit code. When making edits to existing code, clearly indicate the changes needed using '// ... existing code ...' to mark unchanged sections. When writing new code, provide complete, well-documented solutions. Only respond with the code itself, no explanations or markdown formatting. Ensure the code is properly formatted and indented."
+                                    },
+                                    {
+                                        role: "user",
+                                        content: `Current code:\n\`\`\`\n${currentCode}\n\`\`\`\n\nRequest: ${prompt}`
+                                    }
+                                ]
+                            })
+                        });
+
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            console.error('Generation API Error:', {
+                                status: response.status,
+                                text: errorText
+                            });
+                            throw new Error(`API request failed: ${response.status}`);
+                        }
+
+                        const data = await response.json();
+                        const generatedCode = data.choices[0].message.content;
+
+                        // Extract code from any markdown code blocks if present
+                        const codeMatch = generatedCode.match(/```(?:\w+)?\n([\s\S]*?)```/);
+                        const cleanCode = codeMatch ? codeMatch[1].trim() : generatedCode.trim();
+
+                        // Format the code with proper indentation
+                        const formattedCode = cleanCode
+                            .split('\n')
+                            .map(line => line.trimRight()) // Remove trailing spaces
+                            .join('\n')
+                            .trim();
+
+                        // Update the source editor
+                        sourceEditor.setValue(formattedCode);
+                        
+                        // Ensure the editor refreshes and shows the content properly
+                        sourceEditor.refresh();
+
+                    } catch (error) {
+                        console.error('Error:', error);
+                        sourceEditor.setValue(`// Error: ${error.message}`);
+                    } finally {
+                        // Hide loading animation
+                        loadingOverlay.style.display = 'none';
+                        generateButton.disabled = false;
+                        generateButton.textContent = 'Generate';
+                    }
+                }
+
+                // Assemble the UI (make sure this part exists and is in the right order)
+                composerContainer.appendChild(modelSelector);
+                composerContainer.appendChild(promptInput);
+                composerContainer.appendChild(generateButton);
+                
+                container.getElement()[0].appendChild(composerContainer);
+
+                // Clean up when component is destroyed
+                container.on('destroy', () => {
+                    if (styleSheet.parentNode) {
+                        styleSheet.parentNode.removeChild(styleSheet);
+                    }
+                });
+
+            } catch (error) {
+                console.error('Error in Composer initialization:', error);
+                const errorDiv = document.createElement('div');
+                errorDiv.style.cssText = 'color: red; padding: 20px;';
+                errorDiv.textContent = 'Error initializing Composer: ' + error.message;
+                container.getElement()[0].appendChild(errorDiv);
+            }
         });
 
         layout.on("initialised", function () {
